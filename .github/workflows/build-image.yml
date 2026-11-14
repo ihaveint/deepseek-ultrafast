@@ -1,0 +1,63 @@
+name: build-image
+
+# Builds the engine image for linux/amd64 (B300 / sm_103a) on a GitHub-hosted
+# runner — no GPU or special hardware needed, the build is a pure compile.
+# The image is packaged as a gzipped tar and uploaded as a workflow artifact:
+# download it, scp it to the node, then `ctr images import`.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-image.yml"
+      - "deploy/Dockerfile"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "crates/**"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      # The preinstalled toolchains eat most of the runner disk; the CUDA
+      # devel base + Rust/CUDA release build need ~40 GB free.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghc /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost /usr/lib/jvm /usr/share/swift
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          df -h /
+
+      - name: Build image (linux/amd64, sm_103a for B300)
+        run: |
+          docker build \
+            -f deploy/Dockerfile \
+            --build-arg DSUF_SM=sm_103a \
+            -t deepseek-ultrafast:sm_103a \
+            .
+
+      - name: Smoke test image contents
+        run: |
+          docker run --rm --entrypoint sh deepseek-ultrafast:sm_103a -c \
+            'test -x /usr/local/bin/serve && test -x /usr/local/bin/kv-rdma-check && echo "binaries ok"'
+
+      - name: Package image
+        run: |
+          docker builder prune -f >/dev/null 2>&1 || true
+          docker save deepseek-ultrafast:sm_103a | gzip -1 > deepseek-ultrafast-sm_103a-linux-amd64.tar.gz
+          ls -lh deepseek-ultrafast-sm_103a-linux-amd64.tar.gz
+          df -h /
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deepseek-ultrafast-sm_103a-linux-amd64
+          path: deepseek-ultrafast-sm_103a-linux-amd64.tar.gz
+          compression-level: 0
+          retention-days: 14
+          if-no-files-found: error
